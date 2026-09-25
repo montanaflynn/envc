@@ -26,6 +26,7 @@ type fakeVar struct {
 	Target               []string `json:"target"`
 	GitBranch            string   `json:"gitBranch,omitempty"`
 	CustomEnvironmentIds []string `json:"customEnvironmentIds,omitempty"`
+	Decrypted            *bool    `json:"decrypted,omitempty"`
 }
 
 // fakeVercel is an in-memory stand-in for the project env endpoints.
@@ -72,6 +73,35 @@ func (f *fakeVercel) mutations() []string {
 	return out
 }
 
+// refuse mirrors the two rules the real API enforces on a write: a sensitive
+// variable must say visibility "secret", and development cannot hold one.
+func (f *fakeVercel) refuse(r *http.Request, body map[string]any) string {
+	if r.Method != "POST" && r.Method != "PATCH" {
+		return ""
+	}
+	typ, _ := body["type"].(string)
+	if typ != "sensitive" {
+		return ""
+	}
+	if vis, _ := body["visibility"].(string); vis != "secret" {
+		return "Environment variables with `type: sensitive` must use `visibility: secret`."
+	}
+	targets, _ := body["target"].([]any)
+	if r.Method == "PATCH" && targets == nil {
+		if i := f.find(strings.TrimPrefix(r.URL.Path, "/v9/projects/prj_1/env/")); i >= 0 {
+			for _, t := range f.envs[i].Target {
+				targets = append(targets, t)
+			}
+		}
+	}
+	for _, t := range targets {
+		if t == "development" {
+			return "Sensitive environment variables cannot be created in the Development environment."
+		}
+	}
+	return ""
+}
+
 func (f *fakeVercel) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -109,6 +139,11 @@ func (f *fakeVercel) handler() http.Handler {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if msg := f.refuse(r, body); msg != "" {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": "bad_request", "message": msg}})
+			return
+		}
 		const listPath = "/v10/projects/prj_1/env"
 		const itemPrefix = "/v9/projects/prj_1/env/"
 		switch {
@@ -143,6 +178,12 @@ func (f *fakeVercel) handler() http.Handler {
 			for _, v := range envs {
 				if v.Type == "sensitive" {
 					v.Value = ""
+				}
+				// Encrypted values come back as ciphertext, decrypt=true or not.
+				if v.Type == "encrypted" {
+					v.Value = "eyJ2IjoidjIi-ciphertext-" + v.Value
+					no := false
+					v.Decrypted = &no
 				}
 				out = append(out, v)
 			}
@@ -332,7 +373,9 @@ func TestLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := destination.Snapshot{
-		"PLAIN": {Value: "1"}, "ENC": {Value: "2"}, "SENS": {Secret: true}, "LAST": {Value: "5"},
+		// Encrypted values come back as ciphertext, so they are as unreadable
+		// as sensitive ones.
+		"PLAIN": {Value: "1"}, "ENC": {Secret: true}, "SENS": {Secret: true}, "LAST": {Value: "5"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Live = %v, want %v", got, want)
@@ -363,27 +406,41 @@ func TestApply(t *testing.T) {
 				{Key: "S", Value: "sek", Type: "sensitive", Target: []string{"production"}},
 			},
 			wantCalls: []string{
-				"POST " + list + " {key=A target=[production] type=plain value=1}",
-				"POST " + list + " {key=S target=[production] type=sensitive value=sek}",
+				"POST " + list + " {key=A target=[production] type=plain value=1 visibility=config}",
+				"POST " + list + " {key=S target=[production] type=sensitive value=sek visibility=secret}",
 			},
 		},
 		{
 			name: "update / unchanged / secret always re-sent",
 			envs: []fakeVar{
 				{Key: "A", Value: "old", Type: "plain", Target: []string{"production"}},
-				{Key: "U", Value: "same", Type: "encrypted", Target: []string{"production"}},
+				{Key: "U", Value: "same", Type: "plain", Target: []string{"production"}},
 				{Key: "S", Value: "x", Type: "sensitive", Target: []string{"production"}},
 			},
 			want:   destination.Snapshot{"A": {Value: "new"}, "U": {Value: "same"}, "S": {Value: "v2", Secret: true}},
 			report: destination.Report{Updated: []string{"A", "S"}, Unchanged: []string{"U"}},
 			wantEnvs: []fakeVar{
 				{Key: "A", Value: "new", Type: "plain", Target: []string{"production"}},
-				{Key: "U", Value: "same", Type: "encrypted", Target: []string{"production"}},
+				{Key: "U", Value: "same", Type: "plain", Target: []string{"production"}},
 				{Key: "S", Value: "v2", Type: "sensitive", Target: []string{"production"}},
 			},
 			wantCalls: []string{
-				"PATCH " + item + "id1 {target=[production] type=plain value=new}",
-				"PATCH " + item + "id3 {target=[production] type=sensitive value=v2}",
+				"PATCH " + item + "id1 {target=[production] type=plain value=new visibility=config}",
+				"PATCH " + item + "id3 {target=[production] type=sensitive value=v2 visibility=secret}",
+			},
+		},
+		{
+			// A public value stored as encrypted (the dashboard's default) cannot
+			// be compared, so it is re-sent once and becomes plain.
+			name:   "a public value stored encrypted becomes plain",
+			envs:   []fakeVar{{Key: "E", Value: "1", Type: "encrypted", Target: []string{"production"}}},
+			want:   destination.Snapshot{"E": {Value: "1"}},
+			report: destination.Report{Updated: []string{"E"}},
+			wantEnvs: []fakeVar{
+				{Key: "E", Value: "1", Type: "plain", Target: []string{"production"}},
+			},
+			wantCalls: []string{
+				"PATCH " + item + "id1 {target=[production] type=plain value=1 visibility=config}",
 			},
 		},
 		{
@@ -396,8 +453,8 @@ func TestApply(t *testing.T) {
 				{Key: "B", Value: "b", Type: "sensitive", Target: []string{"production"}},
 			},
 			wantCalls: []string{
-				"PATCH " + item + "id1 {target=[production] type=plain value=a}",
-				"PATCH " + item + "id2 {target=[production] type=sensitive value=b}",
+				"PATCH " + item + "id1 {target=[production] type=plain value=a visibility=config}",
+				"PATCH " + item + "id2 {target=[production] type=sensitive value=b visibility=secret}",
 			},
 		},
 		{
@@ -411,7 +468,7 @@ func TestApply(t *testing.T) {
 			},
 			wantCalls: []string{
 				"PATCH " + item + "id1 {target=[preview]}",
-				"POST " + list + " {key=A target=[production] type=plain value=prod-only}",
+				"POST " + list + " {key=A target=[production] type=plain value=prod-only visibility=config}",
 			},
 		},
 		{
@@ -643,8 +700,8 @@ func TestCustomEnvironmentApply(t *testing.T) {
 				{Key: "S", Value: "sek", Type: "sensitive", CustomEnvironmentIds: []string{"env_e1"}},
 			},
 			wantCalls: []string{
-				"POST " + list + " {customEnvironmentIds=[env_e1] key=A type=plain value=1}",
-				"POST " + list + " {customEnvironmentIds=[env_e1] key=S type=sensitive value=sek}",
+				"POST " + list + " {customEnvironmentIds=[env_e1] key=A type=plain value=1 visibility=config}",
+				"POST " + list + " {customEnvironmentIds=[env_e1] key=S type=sensitive value=sek visibility=secret}",
 			},
 		},
 		{
@@ -660,7 +717,7 @@ func TestCustomEnvironmentApply(t *testing.T) {
 				{Key: "U", Value: "same", Type: "plain", CustomEnvironmentIds: []string{"env_e1"}},
 			},
 			wantCalls: []string{
-				"PATCH " + item + "id1 {customEnvironmentIds=[env_e1] type=plain value=new}",
+				"PATCH " + item + "id1 {customEnvironmentIds=[env_e1] type=plain value=new visibility=config}",
 			},
 		},
 		{
@@ -679,9 +736,9 @@ func TestCustomEnvironmentApply(t *testing.T) {
 			},
 			wantCalls: []string{
 				"PATCH " + item + "id1 {customEnvironmentIds=[]}",
-				"POST " + list + " {customEnvironmentIds=[env_e1] key=A type=plain value=edge-a}",
+				"POST " + list + " {customEnvironmentIds=[env_e1] key=A type=plain value=edge-a visibility=config}",
 				"PATCH " + item + "id2 {customEnvironmentIds=[env_q1]}",
-				"POST " + list + " {customEnvironmentIds=[env_e1] key=B type=plain value=edge-b}",
+				"POST " + list + " {customEnvironmentIds=[env_e1] key=B type=plain value=edge-b visibility=config}",
 			},
 		},
 		{
@@ -746,5 +803,47 @@ func TestCustomEnvironmentApply(t *testing.T) {
 				t.Fatalf("mutations = %v, want %v", got, tc.wantCalls)
 			}
 		})
+	}
+}
+
+// Development cannot hold a sensitive variable, and a development secret has
+// to stay readable for `vercel env pull`, so it goes out as "encrypted". The
+// fake refuses a sensitive write to development the way the real API does.
+func TestDevelopmentSecretsAreEncrypted(t *testing.T) {
+	const list = "/v10/projects/prj_1/env"
+	const item = "/v9/projects/prj_1/env/"
+	f := newFake(t)
+	f.add(fakeVar{Key: "S", Value: "old", Type: "encrypted", Target: []string{"development"}})
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+
+	d := newDest(t, srv, map[string]any{"environment": "development", "project": "prj_1"}, nil)
+	want := destination.Snapshot{"S": {Value: "new", Secret: true}, "N": {Value: "n", Secret: true}, "P": {Value: "p"}}
+	if _, err := d.Apply(context.Background(), want, destination.ApplyOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	wantCalls := []string{
+		"POST " + list + " {key=N target=[development] type=encrypted value=n visibility=config}",
+		"POST " + list + " {key=P target=[development] type=plain value=p visibility=config}",
+		"PATCH " + item + "id1 {target=[development] type=encrypted value=new visibility=config}",
+	}
+	if got := f.mutations(); !reflect.DeepEqual(got, wantCalls) {
+		t.Fatalf("mutations = %v, want %v", got, wantCalls)
+	}
+	for _, v := range f.envs {
+		if v.Type == "sensitive" {
+			t.Fatalf("%s is sensitive in development", v.Key)
+		}
+	}
+	// The list returns ciphertext for them, which must not be read as a value.
+	live, err := d.Live(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e := live["S"]; !e.Secret || e.Value != "" {
+		t.Fatalf("live S = %+v, want a hidden secret", e)
+	}
+	if e := live["P"]; e.Secret || e.Value != "p" {
+		t.Fatalf("live P = %+v, want plain p", e)
 	}
 }

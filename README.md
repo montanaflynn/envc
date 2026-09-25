@@ -84,7 +84,7 @@ A destination is anything `envc sync` writes the resolved values to. Destination
 |---|---|---|
 | **dotenv** | `.env` (generated). `.env.local` is a hand override; envc never writes it | filesystem |
 | **github** | GitHub Actions variables (`secret: false`) and secrets (`secret: true`), in a GitHub Environment or, with `scope: repository`, on the repository itself | `GH_TOKEN` / `GITHUB_TOKEN` — a PAT with secrets and variables write, see [GitHub Actions](#github-actions) |
-| **vercel** | Project env vars, for a standard target (`production` \| `preview` \| `development`) or a [custom environment](https://vercel.com/docs/deployments/environments) named by its slug; `sensitive` from `secret:` | `VERCEL_TOKEN` |
+| **vercel** | Project env vars, for a standard target (`production` \| `preview` \| `development`) or a [custom environment](https://vercel.com/docs/deployments/environments) named by its slug; `secret:` becomes type `sensitive` (visibility `secret`), except on `development`, where Vercel allows no sensitive variables and `vercel env pull` has to read them, so it becomes `encrypted` | `VERCEL_TOKEN` |
 | **convex** | One deployment's env vars — a named deployment in a multi-deployment project, or the deployment of a project-per-environment setup | `CONVEX_DEPLOY_KEY`, or the env var named by `key_env` so each environment can hold its own key |
 
 GitHub and Vercel will not return secret values. `diff` uses the [sync record](#envcstateenvsyncyaml) for those keys. Convex returns every value, so `diff` compares live values directly and `sync` keeps no record for it.
