@@ -2,7 +2,11 @@
 // environment: a standard target (production | preview | development) or a
 // custom environment, named by its slug and resolved to its id through the
 // project's custom-environments endpoint on first use. secret: true → type
-// "sensitive", which Vercel never returns; public → type "plain".
+// "sensitive" with visibility "secret", which Vercel never returns; public →
+// type "plain". Development is the exception: Vercel allows sensitive
+// variables only in production and preview, and `vercel env pull` is how
+// development reaches a laptop, so a development secret is type "encrypted"
+// (readable by the team, never by the public).
 //
 // Auth: VERCEL_TOKEN.
 //
@@ -309,9 +313,16 @@ type envVar struct {
 	Target               []string `json:"target"`
 	GitBranch            string   `json:"gitBranch"`
 	CustomEnvironmentIDs []string `json:"customEnvironmentIds"`
+	Decrypted            bool     `json:"decrypted"`
 }
 
-func (e envVar) hidden() bool { return e.Type == "sensitive" || e.Type == "secret" }
+// hidden reports whether the list gave no usable value. Sensitive values never
+// come back, and an encrypted one comes back as ciphertext with
+// decrypted: false even when the list asks for decrypt=true; comparing that to
+// the file would report every development secret as changed.
+func (e envVar) hidden() bool {
+	return e.Type == "sensitive" || e.Type == "secret" || (e.Type == "encrypted" && !e.Decrypted)
+}
 
 func (e envVar) hasTarget(t string) bool {
 	for _, x := range e.Target {
@@ -424,15 +435,27 @@ func (v *Vercel) Live(ctx context.Context) (destination.Snapshot, error) {
 	return snap, nil
 }
 
-func typeFor(secret bool) string {
-	if secret {
-		return "sensitive"
+// kind returns the type and visibility fields for a value. Vercel pairs the
+// two and refuses a mismatch ("Environment variables with `type: sensitive`
+// must use `visibility: secret`"), so both are always sent.
+func (v *Vercel) kind(secret bool) map[string]any {
+	switch {
+	case !secret:
+		return map[string]any{"type": "plain", "visibility": "config"}
+	case !v.custom() && v.cfg.Environment == "development":
+		// "You can only create sensitive environment variables in the
+		// preview and production environments."
+		return map[string]any{"type": "encrypted", "visibility": "config"}
+	default:
+		return map[string]any{"type": "sensitive", "visibility": "secret"}
 	}
-	return "plain"
 }
 
 func (v *Vercel) create(ctx context.Context, key string, e destination.Entry) error {
-	body := map[string]any{"key": key, "value": e.Value, "type": typeFor(e.Secret)}
+	body := map[string]any{"key": key, "value": e.Value}
+	for k, val := range v.kind(e.Secret) {
+		body[k] = val
+	}
 	for k, val := range v.attach() {
 		body[k] = val
 	}
@@ -526,7 +549,10 @@ func (v *Vercel) Apply(ctx context.Context, want destination.Snapshot, opts dest
 			rep.Updated = append(rep.Updated, key)
 		default:
 			if !opts.DryRun {
-				body := map[string]any{"value": e.Value, "type": typeFor(e.Secret)}
+				body := map[string]any{"value": e.Value}
+				for k, val := range v.kind(e.Secret) {
+					body[k] = val
+				}
 				for k, val := range v.attach() {
 					body[k] = val
 				}
