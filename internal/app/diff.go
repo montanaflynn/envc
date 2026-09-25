@@ -120,7 +120,9 @@ func matchLive(want, live destination.Snapshot, fold bool) (destination.Snapshot
 
 // diffKey computes one key's state (README diff semantics table). Destinations
 // that read back secrets (dotenv) are compared directly and never consult
-// the sync record, since sync writes none for them.
+// the sync record, since sync writes none for them. A hidden value is
+// checked by the host's last-updated time against the one recorded at sync,
+// and is unverifiable when either is missing.
 func diffKey(key, value string, live destination.Snapshot, readsBack bool, hasRecord bool, rec state.Destination, rk crypto.DataKey, keyID string) DiffState {
 	if !readsBack {
 		if !hasRecord {
@@ -142,7 +144,14 @@ func diffKey(key, value string, live destination.Snapshot, readsBack bool, hasRe
 		return DiffMissing
 	}
 	if !readsBack && entry.Secret && entry.Value == "" {
-		return DiffUnverifiable
+		synced, ok := rec.Updated[key]
+		switch {
+		case !ok || entry.Updated.IsZero():
+			return DiffUnverifiable
+		case !entry.Updated.Equal(synced):
+			return DiffChangedRemote
+		}
+		return DiffOK
 	}
 	if entry.Value != value {
 		return DiffChangedRemote

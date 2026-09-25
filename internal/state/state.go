@@ -112,6 +112,9 @@ type Destination struct {
 	At    time.Time         `yaml:"at"`
 	KeyID string            `yaml:"key_id"`
 	Keys  map[string]string `yaml:"keys"` // KEY → sync HMAC (16 hex chars)
+	// Updated holds the host's last-changed time for each hidden value, as
+	// read back right after the sync wrote it.
+	Updated map[string]time.Time `yaml:"updated,omitempty"`
 }
 
 // Sync is sync.yaml: destination name → record.
@@ -146,13 +149,21 @@ func LoadSync(root, env string) (Sync, error) {
 }
 
 // Save writes sync.yaml atomically, creating the directory. Times are
-// written as RFC3339 in UTC at second precision.
+// written as RFC3339 in UTC; at is truncated to the second, updated stamps
+// keep the host's precision.
 func (s Sync) Save(root, env string) error {
 	out := make(Sync, len(s))
 	for name, d := range s {
 		d.At = d.At.UTC().Truncate(time.Second)
 		if d.Keys == nil {
 			d.Keys = map[string]string{}
+		}
+		if len(d.Updated) > 0 {
+			updated := make(map[string]time.Time, len(d.Updated))
+			for k, t := range d.Updated {
+				updated[k] = t.UTC()
+			}
+			d.Updated = updated
 		}
 		out[name] = d
 	}

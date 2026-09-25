@@ -155,6 +155,45 @@ vercel:
 	}
 }
 
+func TestSyncUpdatedRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	s := Sync{"vercel": {
+		At:      time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC),
+		KeyID:   "9b1f2e07",
+		Keys:    map[string]string{"API_KEY": "7c11a0b3e9f04d21"},
+		Updated: map[string]time.Time{"API_KEY": time.Date(2026, 9, 24, 5, 0, 1, 123000000, time.FixedZone("PDT", -7*3600))},
+	}}
+	if err := s.Save(root, "production"); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(SyncPath(root, "production"))
+	want := `# Written by envc sync. Commit it. Safe to delete; the next sync recreates it.
+vercel:
+  at: 2026-09-24T12:00:00Z
+  key_id: 9b1f2e07
+  keys:
+    API_KEY: 7c11a0b3e9f04d21
+  updated:
+    API_KEY: 2026-09-24T12:00:01.123Z
+`
+	if string(b) != want {
+		t.Errorf("canonical output mismatch:\n--- got ---\n%s\n--- want ---\n%s", b, want)
+	}
+	got, err := LoadSync(root, "production")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got["vercel"].Updated["API_KEY"].Equal(s["vercel"].Updated["API_KEY"]) {
+		t.Errorf("updated round trip = %v", got["vercel"].Updated)
+	}
+
+	// Records written before timestamps existed still load, with none.
+	os.WriteFile(SyncPath(root, "production"), []byte("github:\n  at: 2026-08-29T23:00:00Z\n  key_id: x\n  keys: {}\n"), 0o644)
+	if got, err = LoadSync(root, "production"); err != nil || len(got["github"].Updated) != 0 {
+		t.Fatalf("old record = %+v, %v", got, err)
+	}
+}
+
 func TestSyncErrors(t *testing.T) {
 	root := t.TempDir()
 	path := SyncPath(root, "production")

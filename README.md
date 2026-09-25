@@ -479,9 +479,13 @@ github:
   keys:
     DATABASE_URL: 7c11a0b3e9f04d21  # first 16 hex of HMAC-SHA256(sync subkey, KEY \0 value)
     LOG_LEVEL: 0d4a9e21c7b3f815
+  updated:
+    DATABASE_URL: 2026-08-29T23:00:01Z  # the host's last-updated time, read back after the push
 vercel:
   …
 ```
+
+`updated` holds, for each value the host hides, the host's own last-updated time (GitHub `updated_at`, Vercel `updatedAt`) as read right after the push. The host changes it on any edit, so `diff` can tell an untouched secret from one edited in a dashboard without ever reading it. Records without it (older envc, or a read-back that failed) still work; those keys are `ok (unverifiable)`.
 
 They are HMACs, not plain hashes: a committed SHA-256 of `ADMIN_PASSWORD=hunter2` is an offline dictionary attack, an HMAC keyed by something only readers hold is not. Sixteen hex characters (64 bits) is plenty to notice a changed value and short enough to read in a diff. Commit it in the same commit as the config change — a PR that changes a value without touching its sync hash is visibly unsynced, and `ensure --dry-run` says so on any machine with a key. Deleting the file is harmless: `diff` treats every key as never synced until the next `sync`.
 
@@ -493,7 +497,9 @@ They are HMACs, not plain hashes: a committed SHA-256 of `ADMIN_PASSWORD=hunter2
 | `key_id` ≠ current | — | `stale sync record (re-keyed elsewhere)` (drift) |
 | hmac ≠ current | — | `changed in file` (drift) |
 | = | readable, ≠ value | `changed at destination` (drift) |
-| = | hidden | `ok (unverifiable)` |
+| = | hidden, host's updated time = recorded | `ok` |
+| = | hidden, host's updated time ≠ recorded | `changed at destination` (drift) |
+| = | hidden, no updated time on either side | `ok (unverifiable)` |
 | = | missing at destination | `missing at destination` (drift) |
 | = | = | `ok` |
 
@@ -897,8 +903,9 @@ package destination
 type Snapshot map[string]Entry
 
 type Entry struct {
-    Value  string
-    Secret bool // Live may leave Value empty when the host hides it
+    Value   string
+    Secret  bool      // Live may leave Value empty when the host hides it
+    Updated time.Time // host's last-updated time, zero if it gives none
 }
 
 type ApplyOptions struct {
@@ -918,8 +925,8 @@ type Destination interface {
 
 1. Put the implementation in `internal/destination/<name>/`.
 2. Register the name so `sync.<env>.<name>` unmarshals into a typed config struct.
-3. Map `secret: true` to the host’s sensitive flag. If it has none, still set the value; `Live` returns empty `Value` and `Secret: true` when the API hides it.
-4. Core writes the sync record from `want` + `Name()` after a successful `Apply`.
+3. Map `secret: true` to the host’s sensitive flag. If it has none, still set the value; `Live` returns empty `Value` and `Secret: true` when the API hides it, plus `Updated` if the API says when the variable last changed.
+4. Core writes the sync record from `want` + `Name()` after a successful `Apply`, then calls `Live` once more to record each hidden value's `Updated`.
 5. Document the auth env var. Map the host's permission and plan failures
    to actionable messages: a 401/403 should say which env var was rejected and
    how to mint a working credential, and a plan-gated feature (Vercel custom

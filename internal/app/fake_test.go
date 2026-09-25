@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/montanaflynn/envc/internal/destination"
 )
@@ -18,6 +19,8 @@ type fakeDest struct {
 	hidden    bool // Live blanks secret values (github/vercel behavior)
 	readsBack bool // implements SecretReader → true (dotenv behavior)
 	foldNames bool // CaseInsensitiveNames → true (github behavior)
+	stamps    bool // Apply sets Entry.Updated on what it writes (github/vercel behavior)
+	clock     int  // seconds past stampEpoch of the last stamped write
 	liveErr   error
 	applyErr  error
 	applies   int
@@ -102,7 +105,7 @@ func (f *fakeDest) Apply(ctx context.Context, want destination.Snapshot, opts de
 		switch {
 		case !ok:
 			rep.Created = append(rep.Created, k)
-		case cur == e:
+		case cur.Value == e.Value && cur.Secret == e.Secret:
 			rep.Unchanged = append(rep.Unchanged, k)
 		default:
 			rep.Updated = append(rep.Updated, k)
@@ -125,6 +128,11 @@ func (f *fakeDest) Apply(ctx context.Context, want destination.Snapshot, opts de
 	}
 	next := destination.Snapshot{}
 	for k, e := range want {
+		if cur, ok := f.live[k]; ok && cur.Value == e.Value && cur.Secret == e.Secret {
+			e.Updated = cur.Updated
+		} else if f.stamps {
+			e.Updated = f.tick()
+		}
 		next[k] = e
 	}
 	if !opts.Prune {
@@ -136,6 +144,15 @@ func (f *fakeDest) Apply(ctx context.Context, want destination.Snapshot, opts de
 	}
 	f.live = next
 	return rep, nil
+}
+
+// stampEpoch is the fake host's clock origin.
+var stampEpoch = time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+
+// tick advances the fake host's clock and returns the new time.
+func (f *fakeDest) tick() time.Time {
+	f.clock++
+	return stampEpoch.Add(time.Duration(f.clock) * time.Second)
 }
 
 // fakeReader wraps a fakeDest to advertise ReadsBackSecrets (dotenv-like).

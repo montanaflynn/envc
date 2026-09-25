@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/nacl/box"
 
@@ -29,6 +30,7 @@ type fakeGitHub struct {
 	mu      sync.Mutex
 	vars    map[string]string
 	secrets map[string][]byte // sealed values, decrypted in assertions
+	stamps  map[string]string // secret name → updated_at, when set
 	pub     *[32]byte
 	priv    *[32]byte
 	keyID   string
@@ -151,7 +153,11 @@ func (f *fakeGitHub) handler() http.Handler {
 		case rest == "secrets" && r.Method == "GET":
 			items := []map[string]string{}
 			for _, n := range sortedKeys(f.secrets) {
-				items = append(items, map[string]string{"name": n})
+				item := map[string]string{"name": n}
+				if at, ok := f.stamps[n]; ok {
+					item["updated_at"] = at
+				}
+				items = append(items, item)
 			}
 			json.NewEncoder(w).Encode(map[string]any{"total_count": len(items), "secrets": items})
 		case rest == "secrets/public-key" && r.Method == "GET":
@@ -376,6 +382,7 @@ func TestLive(t *testing.T) {
 	}
 	f.secrets["S1"] = []byte("x")
 	f.secrets["S2"] = []byte("y")
+	f.stamps = map[string]string{"S1": "2026-09-24T12:00:01Z"}
 	srv := httptest.NewServer(f.handler())
 	defer srv.Close()
 
@@ -386,7 +393,7 @@ func TestLive(t *testing.T) {
 	}
 	want := destination.Snapshot{
 		"V0": {Value: "0"}, "V1": {Value: "1"}, "V2": {Value: "2"}, "V3": {Value: "3"}, "V4": {Value: "4"},
-		"S1": {Secret: true}, "S2": {Secret: true},
+		"S1": {Secret: true, Updated: time.Date(2026, 9, 24, 12, 0, 1, 0, time.UTC)}, "S2": {Secret: true},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Live = %v, want %v", got, want)
