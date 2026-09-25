@@ -201,3 +201,74 @@ func TestDiffCaseInsensitiveNames(t *testing.T) {
 		t.Fatalf("unrelated: %v", keys)
 	}
 }
+
+// A host that hides secret values but reports when each was last updated
+// (GitHub, Vercel) lets diff tell an untouched secret from one edited at the
+// destination since the last sync.
+func TestDiffDestinationTimestamps(t *testing.T) {
+	r, a, fa, _ := syncRepo(t)
+	fa.stamps = true
+	_, err := a.Sync(context.Background(), "prod", "fake", false)
+	must(t, err)
+
+	rec, _ := state.LoadSync(r.root, "prod")
+	if at := rec["fake"].Updated["SECRET"]; !at.Equal(fa.live["SECRET"].Updated) || at.IsZero() {
+		t.Fatalf("recorded SECRET stamp %v, live %v", at, fa.live["SECRET"].Updated)
+	}
+	if _, ok := rec["fake"].Updated["PUBLIC"]; ok {
+		t.Fatalf("readable PUBLIC should not be stamped: %v", rec["fake"].Updated)
+	}
+	if keys := diffKeys(t, a, "fake"); keys["SECRET"] != DiffOK || keys["PUBLIC"] != DiffOK {
+		t.Fatalf("after sync: %v", keys)
+	}
+
+	// Someone edits the secret in the host's dashboard.
+	e := fa.live["SECRET"]
+	e.Value, e.Updated = "dashboard", fa.tick()
+	fa.live["SECRET"] = e
+	if keys := diffKeys(t, a, "fake"); keys["SECRET"] != DiffChangedRemote {
+		t.Fatalf("remote edit: %v", keys)
+	}
+
+	// sync overwrites it and records the new stamp.
+	_, err = a.Sync(context.Background(), "prod", "fake", false)
+	must(t, err)
+	if keys := diffKeys(t, a, "fake"); keys["SECRET"] != DiffOK {
+		t.Fatalf("after resync: %v", keys)
+	}
+
+	// Re-keying carries the stamps with the HMACs.
+	must(t, a.rekey("prod"))
+	if keys := diffKeys(t, a, "fake"); keys["SECRET"] != DiffOK {
+		t.Fatalf("after rekey: %v", keys)
+	}
+
+	// A record with no stamp (older envc) falls back to unverifiable.
+	rec, _ = state.LoadSync(r.root, "prod")
+	d := rec["fake"]
+	d.Updated = nil
+	rec["fake"] = d
+	must(t, rec.Save(r.root, "prod"))
+	if keys := diffKeys(t, a, "fake"); keys["SECRET"] != DiffUnverifiable {
+		t.Fatalf("no stamp: %v", keys)
+	}
+}
+
+// Stamps are recorded under the wanted spelling when the host folds names.
+func TestSyncStampsFoldedNames(t *testing.T) {
+	r, a, fa, _ := syncRepo(t)
+	fa.stamps, fa.foldNames = true, true
+	must(t, a.Set("prod", "lower_secret", secretVal("x")))
+	_, err := a.Sync(context.Background(), "prod", "fake", false)
+	must(t, err)
+	fa.live["LOWER_SECRET"] = fa.live["lower_secret"]
+	delete(fa.live, "lower_secret")
+
+	rec, _ := state.LoadSync(r.root, "prod")
+	if rec["fake"].Updated["lower_secret"].IsZero() {
+		t.Fatalf("stamps = %v", rec["fake"].Updated)
+	}
+	if keys := diffKeys(t, a, "fake"); keys["lower_secret"] != DiffOK {
+		t.Fatalf("folded: %v", keys)
+	}
+}

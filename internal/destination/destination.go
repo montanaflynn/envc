@@ -10,12 +10,17 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Entry is one variable as a destination sees it.
 type Entry struct {
 	Value  string
 	Secret bool // Live may leave Value empty when the host hides it
+	// Updated is when the host last changed the variable, zero when it does
+	// not say. Live sets it where the host hides values, so diff can notice an
+	// edit made at the host since the last sync without reading the value.
+	Updated time.Time
 }
 
 // Snapshot is the set of variables at (or wanted at) a destination.

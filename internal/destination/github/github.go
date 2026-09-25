@@ -31,6 +31,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/nacl/box"
 
@@ -303,14 +304,15 @@ func (g *GitHub) apiError(method, path string, resp *httpx.Response) error {
 	return fmt.Errorf("github: %d %s (%s)", resp.StatusCode, msg, where)
 }
 
-// live is the raw destination state: variables by name and secret names.
+// live is the raw destination state: variables by name, and secret names
+// with when each was last updated (zero if GitHub omitted it).
 type live struct {
 	vars    map[string]string
-	secrets map[string]struct{}
+	secrets map[string]time.Time
 }
 
 func (g *GitHub) fetch(ctx context.Context) (*live, error) {
-	l := &live{vars: map[string]string{}, secrets: map[string]struct{}{}}
+	l := &live{vars: map[string]string{}, secrets: map[string]time.Time{}}
 	for page := 1; ; page++ {
 		var out struct {
 			TotalCount int `json:"total_count"`
@@ -333,14 +335,15 @@ func (g *GitHub) fetch(ctx context.Context) (*live, error) {
 		var out struct {
 			TotalCount int `json:"total_count"`
 			Secrets    []struct {
-				Name string `json:"name"`
+				Name      string    `json:"name"`
+				UpdatedAt time.Time `json:"updated_at"`
 			} `json:"secrets"`
 		}
 		if err := g.do(ctx, http.MethodGet, fmt.Sprintf("%s/secrets?per_page=100&page=%d", g.envPath(), page), nil, &out); err != nil {
 			return nil, err
 		}
 		for _, s := range out.Secrets {
-			l.secrets[s.Name] = struct{}{}
+			l.secrets[s.Name] = s.UpdatedAt.UTC()
 		}
 		if len(out.Secrets) == 0 || len(l.secrets) >= out.TotalCount {
 			break
@@ -359,8 +362,8 @@ func (g *GitHub) Live(ctx context.Context) (destination.Snapshot, error) {
 	for k, v := range l.vars {
 		snap[k] = destination.Entry{Value: v}
 	}
-	for k := range l.secrets {
-		snap[k] = destination.Entry{Secret: true}
+	for k, at := range l.secrets {
+		snap[k] = destination.Entry{Secret: true, Updated: at}
 	}
 	return snap, nil
 }

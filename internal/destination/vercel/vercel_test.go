@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/montanaflynn/envc/internal/destination"
 )
@@ -27,6 +28,7 @@ type fakeVar struct {
 	GitBranch            string   `json:"gitBranch,omitempty"`
 	CustomEnvironmentIds []string `json:"customEnvironmentIds,omitempty"`
 	Decrypted            *bool    `json:"decrypted,omitempty"`
+	UpdatedAt            int64    `json:"updatedAt,omitempty"`
 }
 
 // fakeVercel is an in-memory stand-in for the project env endpoints.
@@ -360,7 +362,7 @@ func TestLive(t *testing.T) {
 	f.pageSize = 2
 	f.add(fakeVar{Key: "PLAIN", Value: "1", Type: "plain", Target: []string{"production"}})
 	f.add(fakeVar{Key: "ENC", Value: "2", Type: "encrypted", Target: []string{"production", "preview"}})
-	f.add(fakeVar{Key: "SENS", Value: "hidden", Type: "sensitive", Target: []string{"production"}})
+	f.add(fakeVar{Key: "SENS", Value: "hidden", Type: "sensitive", Target: []string{"production"}, UpdatedAt: 1790251201123})
 	f.add(fakeVar{Key: "OTHER", Value: "3", Type: "plain", Target: []string{"preview"}})
 	f.add(fakeVar{Key: "BRANCH", Value: "4", Type: "plain", Target: []string{"production"}, GitBranch: "feat"})
 	f.add(fakeVar{Key: "LAST", Value: "5", Type: "plain", Target: []string{"development", "production"}})
@@ -375,7 +377,7 @@ func TestLive(t *testing.T) {
 	want := destination.Snapshot{
 		// Encrypted values come back as ciphertext, so they are as unreadable
 		// as sensitive ones.
-		"PLAIN": {Value: "1"}, "ENC": {Secret: true}, "SENS": {Secret: true}, "LAST": {Value: "5"},
+		"PLAIN": {Value: "1"}, "ENC": {Secret: true}, "SENS": {Secret: true, Updated: time.UnixMilli(1790251201123).UTC()}, "LAST": {Value: "5"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Live = %v, want %v", got, want)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/montanaflynn/envc/internal/crypto"
 	"github.com/montanaflynn/envc/internal/destination"
@@ -117,7 +118,7 @@ func (a *App) Sync(ctx context.Context, env, only string, prune bool) ([]SyncRes
 		}
 		res.Report, res.Err = d.Apply(ctx, want, opts)
 		if res.Err == nil && !a.Opts.DryRun && !readsBackSecrets(d) {
-			res.Err = a.writeSyncState(env, name, rk, keyID, vars)
+			res.Err = a.writeSyncState(env, name, rk, keyID, vars, hiddenStamps(ctx, d, want))
 		}
 		results = append(results, res)
 	}
@@ -132,8 +133,30 @@ func (a *App) Sync(ctx context.Context, env, only string, prune bool) ([]SyncRes
 	return results, nil
 }
 
-// writeSyncState records the synced values for one destination.
-func (a *App) writeSyncState(env, name string, k crypto.DataKey, keyID string, vars resolve.Vars) error {
+// hiddenStamps reads d back after a write and returns, per wanted key, when
+// the host says each hidden value was last updated. A failed read returns
+// nil: the record is still written, and diff calls those keys unverifiable.
+func hiddenStamps(ctx context.Context, d destination.Destination, want destination.Snapshot) map[string]time.Time {
+	live, err := d.Live(ctx)
+	if err != nil {
+		return nil
+	}
+	live, _ = matchLive(want, live, caseInsensitiveNames(d))
+	var stamps map[string]time.Time
+	for key, e := range live {
+		if e.Secret && e.Value == "" && !e.Updated.IsZero() {
+			if stamps == nil {
+				stamps = map[string]time.Time{}
+			}
+			stamps[key] = e.Updated
+		}
+	}
+	return stamps
+}
+
+// writeSyncState records the synced values for one destination, with the
+// host's last-updated stamps for values it hides.
+func (a *App) writeSyncState(env, name string, k crypto.DataKey, keyID string, vars resolve.Vars, updated map[string]time.Time) error {
 	rec, err := state.LoadSync(a.root(), env)
 	if err != nil {
 		return fmt.Errorf("sync record: %w", err)
@@ -142,7 +165,7 @@ func (a *App) writeSyncState(env, name string, k crypto.DataKey, keyID string, v
 	for key, v := range vars {
 		keys[key] = k.SyncHMAC(key, v)
 	}
-	rec[name] = state.Destination{At: a.now().UTC(), KeyID: keyID, Keys: keys}
+	rec[name] = state.Destination{At: a.now().UTC(), KeyID: keyID, Keys: keys, Updated: updated}
 	if err := rec.Save(a.root(), env); err != nil {
 		return fmt.Errorf("sync record: %w", err)
 	}

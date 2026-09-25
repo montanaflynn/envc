@@ -465,8 +465,8 @@ func envelopeRecipients(f *envfile.File) []string {
 // rekeySyncState carries the sync record across a data-key change: every
 // stored HMAC that still matches the current value under the old key is
 // rewritten under the new key, so a re-key with no value changes leaves
-// diff clean. Entries that no longer match are dropped (they were unsynced
-// anyway). A record made under some other key is left alone; diff reports it
+// diff clean. Entries that no longer match are dropped with their updated
+// stamps (they were unsynced anyway). A record made under some other key is left alone; diff reports it
 // as stale.
 func (a *App) rekeySyncState(env string, vars resolve.Vars, old, k crypto.DataKey) error {
 	if isBase(env) {
@@ -488,6 +488,11 @@ func (a *App) rekeySyncState(env string, vars resolve.Vars, old, k crypto.DataKe
 		for key, h := range d.Keys {
 			if v, ok := vars[key]; ok && h == old.SyncHMAC(key, v) {
 				keys[key] = k.SyncHMAC(key, v)
+			}
+		}
+		for key := range d.Updated {
+			if _, ok := keys[key]; !ok {
+				delete(d.Updated, key)
 			}
 		}
 		d.KeyID, d.Keys = k.ID(), keys

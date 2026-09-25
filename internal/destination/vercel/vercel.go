@@ -33,6 +33,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/montanaflynn/envc/internal/destination"
 	"github.com/montanaflynn/envc/internal/destination/internal/httpx"
@@ -314,6 +315,7 @@ type envVar struct {
 	GitBranch            string   `json:"gitBranch"`
 	CustomEnvironmentIDs []string `json:"customEnvironmentIds"`
 	Decrypted            bool     `json:"decrypted"`
+	UpdatedAt            int64    `json:"updatedAt"` // unix ms
 }
 
 // hidden reports whether the list gave no usable value. Sensitive values never
@@ -415,7 +417,8 @@ func (v *Vercel) mine(all []envVar) map[string]envVar {
 	return out
 }
 
-// Live returns the variables for our environment. Sensitive ones have no value.
+// Live returns the variables for our environment. Sensitive ones have no
+// value, only when they were last updated.
 func (v *Vercel) Live(ctx context.Context) (destination.Snapshot, error) {
 	if err := v.resolveCustom(ctx); err != nil {
 		return nil, err
@@ -427,7 +430,11 @@ func (v *Vercel) Live(ctx context.Context) (destination.Snapshot, error) {
 	snap := destination.Snapshot{}
 	for k, e := range v.mine(all) {
 		if e.hidden() {
-			snap[k] = destination.Entry{Secret: true}
+			entry := destination.Entry{Secret: true}
+			if e.UpdatedAt > 0 {
+				entry.Updated = time.UnixMilli(e.UpdatedAt).UTC()
+			}
+			snap[k] = entry
 		} else {
 			snap[k] = destination.Entry{Value: e.Value}
 		}
