@@ -302,3 +302,20 @@ func TestCheckDotenvStale(t *testing.T) {
 		t.Fatalf("public stale without key: %v", problemPaths(ps))
 	}
 }
+
+// Two environments at repository scope on one repository overwrite each
+// other; check reports it for hand-written config that env add would refuse.
+func TestCheckGitHubRepositoryScopeConflict(t *testing.T) {
+	r := newRepo(t)
+	a := r.open()
+	must(t, a.EnvAdd("prod", EnvAddOptions{}))
+	must(t, a.EnvAdd("staging", EnvAddOptions{}))
+	a.Roster.Sync["prod"] = map[string]roster.DestConfig{"github": {"scope": "repository", "repository": "acme/app"}}
+	a.Roster.Sync["staging"] = map[string]roster.DestConfig{"github": {"scope": "repository", "repository": "Acme/App"}}
+	must(t, a.saveRoster())
+	ps, err := r.open().inspect("")
+	must(t, err)
+	if !hasProblem(ps, ".envc.yaml", "sync.prod.github", "staging also syncs to") || !hasProblem(ps, ".envc.yaml", "sync.staging.github", "prod also syncs to") {
+		t.Fatalf("problems: %v", ps)
+	}
+}

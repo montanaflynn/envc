@@ -1,10 +1,16 @@
-// Package github syncs to GitHub Actions Environment variables (public) and
-// Environment secrets (secret) over the REST API. Secrets are sealed with the
-// environment's libsodium public key. Live returns secret names with empty
-// values because GitHub never returns secret values.
+// Package github syncs to GitHub Actions variables (public) and secrets
+// (secret) over the REST API, scoped to one Environment (the default) or to
+// the repository itself. Secrets are sealed with the scope's libsodium public
+// key. Live returns secret names with empty values because GitHub never
+// returns secret values.
+//
+// Environments on private repositories need a paid GitHub plan; repository
+// scope works on every plan but is shared by all of a repository's
+// workflows, so it refuses prune.
 //
 // Auth: GH_TOKEN, then GITHUB_TOKEN. Needs a PAT/App token with Environment
-// write; the GitHub Actions-provided GITHUB_TOKEN cannot manage secrets.
+// (or repository) secrets and variables write; the GitHub Actions-provided
+// GITHUB_TOKEN cannot manage secrets.
 //
 // GitHub stores variable and secret names case-insensitively (and reports
 // them uppercased), so Apply matches live names to wanted keys with
@@ -36,11 +42,18 @@ const Name = "github"
 
 const defaultBaseURL = "https://api.github.com"
 
+// Scopes: where variables and secrets live.
+const (
+	ScopeEnvironment = "environment" // one GitHub Environment
+	ScopeRepository  = "repository"  // repository-level Actions secrets/variables
+)
+
 // Config is sync.<env>.github.
 type Config struct {
-	Environment string `yaml:"environment"`          // default: env name
-	Repository  string `yaml:"repository,omitempty"` // owner/repo; default: git remote origin
-	BaseURL     string `yaml:"base_url,omitempty"`   // default https://api.github.com (tests / GHES)
+	Scope       string `yaml:"scope,omitempty"`       // default: environment
+	Environment string `yaml:"environment,omitempty"` // default: env name; empty for repository scope
+	Repository  string `yaml:"repository,omitempty"`  // owner/repo; default: git remote origin
+	BaseURL     string `yaml:"base_url,omitempty"`    // default https://api.github.com (tests / GHES)
 }
 
 // ParseConfig decodes the raw block with defaults applied; resolves the
@@ -53,6 +66,8 @@ func ParseConfig(root, envName string, raw map[string]any) (Config, error) {
 			return Config{}, fmt.Errorf("github: %q must be a string", k)
 		}
 		switch k {
+		case "scope":
+			cfg.Scope = s
 		case "environment":
 			cfg.Environment = s
 		case "repository":
@@ -60,14 +75,24 @@ func ParseConfig(root, envName string, raw map[string]any) (Config, error) {
 		case "base_url":
 			cfg.BaseURL = s
 		default:
-			return Config{}, fmt.Errorf("github: unknown field %q (allowed: environment, repository, base_url)", k)
+			return Config{}, fmt.Errorf("github: unknown field %q (allowed: scope, environment, repository, base_url)", k)
 		}
 	}
-	if cfg.Environment == "" {
-		cfg.Environment = envName
-	}
-	if cfg.Environment == "" {
-		return Config{}, errors.New("github: environment is required")
+	switch cfg.Scope {
+	case "", ScopeEnvironment:
+		cfg.Scope = ScopeEnvironment
+		if cfg.Environment == "" {
+			cfg.Environment = envName
+		}
+		if cfg.Environment == "" {
+			return Config{}, errors.New("github: environment is required")
+		}
+	case ScopeRepository:
+		if cfg.Environment != "" {
+			return Config{}, fmt.Errorf("github: environment does not apply to scope: repository (remove environment: %s)", cfg.Environment)
+		}
+	default:
+		return Config{}, fmt.Errorf("github: scope %q must be %s or %s", cfg.Scope, ScopeEnvironment, ScopeRepository)
 	}
 	if cfg.Repository == "" {
 		repo, err := remoteRepository(root)
@@ -187,13 +212,26 @@ func (g *GitHub) token() (string, error) {
 			return v, nil
 		}
 	}
-	return "", errors.New("github: no token: set GH_TOKEN or GITHUB_TOKEN to a PAT with access to Environment variables and secrets")
+	return "", errors.New("github: no token: set GH_TOKEN or GITHUB_TOKEN to a PAT with access to Actions variables and secrets")
 }
 
-// envPath is the URL path prefix for this repository environment.
+// envPath is the URL path prefix the variables and secrets endpoints hang
+// off: the Environment, or the repository's actions/ for repository scope.
 func (g *GitHub) envPath() string {
 	owner, repo, _ := strings.Cut(g.cfg.Repository, "/")
-	return "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) + "/environments/" + url.PathEscape(g.cfg.Environment)
+	p := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo)
+	if g.cfg.Scope == ScopeRepository {
+		return p + "/actions"
+	}
+	return p + "/environments/" + url.PathEscape(g.cfg.Environment)
+}
+
+// target names what is being written for error messages.
+func (g *GitHub) target() string {
+	if g.cfg.Scope == ScopeRepository {
+		return fmt.Sprintf("repository %q", g.cfg.Repository)
+	}
+	return fmt.Sprintf("repository %q or environment %q", g.cfg.Repository, g.cfg.Environment)
 }
 
 // do performs one API call. On 2xx, out (if non-nil) is decoded from the
@@ -249,9 +287,18 @@ func (g *GitHub) apiError(method, path string, resp *httpx.Response) error {
 	case http.StatusUnauthorized:
 		return fmt.Errorf("github: 401 %s (%s): the token in GH_TOKEN/GITHUB_TOKEN was rejected; check it is valid and not expired", msg, where)
 	case http.StatusForbidden:
-		return fmt.Errorf("github: 403 %s (%s): the token lacks permission on %s; use a fine-grained PAT with \"Environments\" and \"Secrets\"/\"Variables\" read+write (or classic PAT with repo scope). The GitHub Actions-provided GITHUB_TOKEN cannot manage environment secrets", msg, where, g.cfg.Repository)
+		// GitHub Free answers "Upgrade to GitHub Pro or make this repository
+		// public…" for Environments on private repositories.
+		if strings.Contains(strings.ToLower(msg), "upgrade") {
+			hint := "GitHub Environments on private repositories need a Pro, Team, or Enterprise plan"
+			if g.cfg.Scope == ScopeEnvironment {
+				hint += "; set scope: repository under sync.<env>.github to use repository secrets instead (one envc environment per repository)"
+			}
+			return fmt.Errorf("github: 403 %s (%s): %s", msg, where, hint)
+		}
+		return fmt.Errorf("github: 403 %s (%s): the token lacks permission on %s; use a fine-grained PAT with \"Environments\" and \"Secrets\"/\"Variables\" read+write (or classic PAT with repo scope). The GitHub Actions-provided GITHUB_TOKEN cannot manage secrets", msg, where, g.cfg.Repository)
 	case http.StatusNotFound:
-		return fmt.Errorf("github: 404 %s (%s): repository %q or environment %q not found, or the token cannot see it (GitHub answers 404 for private repositories the token has no access to)", msg, where, g.cfg.Repository, g.cfg.Environment)
+		return fmt.Errorf("github: 404 %s (%s): %s not found, or the token cannot see it (GitHub answers 404 for private repositories the token has no access to)", msg, where, g.target())
 	}
 	return fmt.Errorf("github: %d %s (%s)", resp.StatusCode, msg, where)
 }
@@ -302,7 +349,7 @@ func (g *GitHub) fetch(ctx context.Context) (*live, error) {
 	return l, nil
 }
 
-// Live lists environment variables (with values) and secrets (names only).
+// Live lists variables (with values) and secrets (names only).
 func (g *GitHub) Live(ctx context.Context) (destination.Snapshot, error) {
 	l, err := g.fetch(ctx)
 	if err != nil {
@@ -346,7 +393,7 @@ func (g *GitHub) publicKey(ctx context.Context) (*publicKey, error) {
 	}
 	raw, err := base64.StdEncoding.DecodeString(out.Key)
 	if err != nil || len(raw) != 32 {
-		return nil, fmt.Errorf("github: environment public key is not a 32-byte base64 key")
+		return nil, fmt.Errorf("github: secrets public key is not a 32-byte base64 key")
 	}
 	pk := &publicKey{ID: out.KeyID}
 	copy(pk.Key[:], raw)
@@ -362,11 +409,15 @@ func seal(value string, pk *publicKey) (string, error) {
 	return base64.StdEncoding.EncodeToString(sealed), nil
 }
 
-// Apply reconciles the environment with want. Secrets cannot be read back, so
+// Apply reconciles the scope with want. Secrets cannot be read back, so
 // every wanted secret is re-sealed and PUT, and reported Updated (or Created
 // if the name was absent). A key that exists as the other kind is deleted
-// first. Prune removes variables and secrets not in want.
+// first. Prune removes variables and secrets not in want; it is refused at
+// repository scope, where envc is not the only writer.
 func (g *GitHub) Apply(ctx context.Context, want destination.Snapshot, opts destination.ApplyOptions) (destination.Report, error) {
+	if opts.Prune && g.cfg.Scope == ScopeRepository {
+		return destination.Report{}, fmt.Errorf("github: prune is not supported with scope: repository; repository secrets are shared with everything else that sets them, so delete removed keys in %s settings by hand", g.cfg.Repository)
+	}
 	l, err := g.fetch(ctx)
 	if err != nil {
 		return destination.Report{}, err
