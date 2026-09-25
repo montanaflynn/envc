@@ -173,3 +173,51 @@ func TestEnvAddPinsDiscoveredSettings(t *testing.T) {
 		wantExit(t, r.open().EnvAdd("prod", EnvAddOptions{GitHub: "production"}), ExitUsage, "repository")
 	})
 }
+
+func TestEnvAddGitHubRepositoryScope(t *testing.T) {
+	r := newRepo(t)
+	r.gitRemote("git@github.com:acme/app.git")
+	a := r.open()
+	wantExit(t, a.EnvAdd("prod", EnvAddOptions{GitHub: "production", GitHubScope: "repository"}), ExitUsage, "--github NAME does not apply")
+	wantExit(t, a.EnvAdd("prod", EnvAddOptions{GitHubScope: "org"}), ExitUsage, `scope "org"`)
+	wantExit(t, a.EnvAdd("prod", EnvAddOptions{GitHubScope: "environment"}), ExitUsage, "--github-scope environment requires --github")
+
+	must(t, a.EnvAdd("prod", EnvAddOptions{GitHubScope: "repository"}))
+	rs, _ := roster.Load(r.root)
+	want := roster.DestConfig{"scope": "repository", "repository": "acme/app"}
+	if !reflect.DeepEqual(rs.Sync["prod"]["github"], want) {
+		t.Fatalf("github = %v, want %v", rs.Sync["prod"]["github"], want)
+	}
+	probs, err := r.open().inspect("")
+	must(t, err)
+	if len(probs) != 0 {
+		t.Fatalf("check: %v", probs)
+	}
+
+	// Repository scope is shared: a second environment on the same
+	// repository would overwrite the first on every sync.
+	wantExit(t, a.EnvAdd("staging", EnvAddOptions{GitHubScope: "repository"}), ExitUsage, "prod already syncs to acme/app")
+	rs, _ = roster.Load(r.root)
+	if _, ok := rs.Sync["staging"]; ok {
+		t.Fatalf("sync.staging written despite conflict: %v", rs.Sync["staging"])
+	}
+	if _, err := os.Stat(filepath.Join(r.root, ".envc/environments/staging.yaml")); err == nil {
+		t.Fatal("refused env add left .envc/environments/staging.yaml behind")
+	}
+	// Environment scope on the same repository is fine.
+	must(t, a.EnvAdd("staging", EnvAddOptions{GitHub: "staging"}))
+
+	// Switching scopes rewrites the block instead of leaving a stale field.
+	must(t, a.EnvAdd("prod", EnvAddOptions{GitHub: "production"}))
+	rs, _ = roster.Load(r.root)
+	want = roster.DestConfig{"environment": "production", "repository": "acme/app"}
+	if !reflect.DeepEqual(rs.Sync["prod"]["github"], want) {
+		t.Fatalf("github = %v, want %v", rs.Sync["prod"]["github"], want)
+	}
+	must(t, a.EnvAdd("prod", EnvAddOptions{GitHubScope: "repository"}))
+	rs, _ = roster.Load(r.root)
+	want = roster.DestConfig{"scope": "repository", "repository": "acme/app"}
+	if !reflect.DeepEqual(rs.Sync["prod"]["github"], want) {
+		t.Fatalf("github = %v, want %v", rs.Sync["prod"]["github"], want)
+	}
+}

@@ -24,7 +24,10 @@ func (c *cli) envAddCmd() *cobra.Command {
 merges destination flags into sync.NAME. Running add on an existing
 environment only adds destinations. --vercel pins the project (and team)
 from --vercel-project or .vercel/project.json; --github pins the repository
-from git remote origin, so ensure and CI never depend on local state.`,
+from git remote origin, so ensure and CI never depend on local state.
+--github-scope repository syncs to repository-level Actions secrets instead
+of an Environment (works on GitHub Free private repos; one envc environment
+per repository).`,
 		Args: usageArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Flag combinations are app's call: --override alone is fine on
@@ -45,6 +48,7 @@ from git remote origin, so ensure and CI never depend on local state.`,
 	f.StringVar(&o.Dotenv, "dotenv", "", "write a .env file at `PATH`")
 	f.StringVar(&o.Override, "override", "", "hand-edited override file at `PATH` (default .env.local)")
 	f.StringVar(&o.GitHub, "github", "", "GitHub Environment `NAME`")
+	f.StringVar(&o.GitHubScope, "github-scope", "", "GitHub `SCOPE`: environment (default) or repository")
 	f.StringVar(&o.Vercel, "vercel", "", "Vercel environment: production|preview|development, or a custom environment slug")
 	f.StringVar(&o.VercelProject, "vercel-project", "", "Vercel project `NAME`")
 	f.StringVar(&o.Convex, "convex", "", "Convex deployment `NAME`")

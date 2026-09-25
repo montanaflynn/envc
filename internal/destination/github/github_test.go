@@ -36,6 +36,7 @@ type fakeGitHub struct {
 	fail    map[string]int
 	perPage int
 	token   string
+	prefix  string // path the variables/secrets endpoints live under
 }
 
 func newFake(t *testing.T) *fakeGitHub {
@@ -46,6 +47,7 @@ func newFake(t *testing.T) *fakeGitHub {
 	return &fakeGitHub{
 		t: t, vars: map[string]string{}, secrets: map[string][]byte{},
 		pub: pub, priv: priv, keyID: "key-123", fail: map[string]int{}, perPage: 30, token: "tok",
+		prefix: "/repos/acme/widgets/environments/production/",
 	}
 }
 
@@ -73,7 +75,7 @@ func (f *fakeGitHub) mutations() []string {
 }
 
 func (f *fakeGitHub) handler() http.Handler {
-	const prefix = "/repos/acme/widgets/environments/production/"
+	prefix := f.prefix
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -199,6 +201,12 @@ func sortedKeys[V any](m map[string]V) []string {
 
 func newDest(t *testing.T, srv *httptest.Server, getenv func(string) string) destination.Destination {
 	t.Helper()
+	return newDestRaw(t, srv, getenv, nil)
+}
+
+// newDestRaw is newDest with extra config fields merged over the defaults.
+func newDestRaw(t *testing.T, srv *httptest.Server, getenv func(string) string, extra map[string]any) destination.Destination {
+	t.Helper()
 	if getenv == nil {
 		getenv = func(k string) string {
 			if k == "GH_TOKEN" {
@@ -207,8 +215,11 @@ func newDest(t *testing.T, srv *httptest.Server, getenv func(string) string) des
 			return ""
 		}
 	}
-	d, err := destination.New(Name, destination.Env{Root: t.TempDir(), Env: "production", Getenv: getenv, Log: &bytes.Buffer{}},
-		map[string]any{"repository": "acme/widgets", "base_url": srv.URL + "/"})
+	raw := map[string]any{"repository": "acme/widgets", "base_url": srv.URL + "/"}
+	for k, v := range extra {
+		raw[k] = v
+	}
+	d, err := destination.New(Name, destination.Env{Root: t.TempDir(), Env: "production", Getenv: getenv, Log: &bytes.Buffer{}}, raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,13 +241,20 @@ func TestParseConfig(t *testing.T) {
 		wantErr string
 	}{
 		{name: "explicit", raw: map[string]any{"environment": "prod", "repository": "o/r", "base_url": "https://ghe.example/api/v3/"},
-			want: Config{Environment: "prod", Repository: "o/r", BaseURL: "https://ghe.example/api/v3"}},
+			want: Config{Scope: ScopeEnvironment, Environment: "prod", Repository: "o/r", BaseURL: "https://ghe.example/api/v3"}},
 		{name: "defaults from env name and ssh remote", raw: nil, remote: "git@github.com:acme/widgets.git",
-			want: Config{Environment: "production", Repository: "acme/widgets", BaseURL: "https://api.github.com"}},
+			want: Config{Scope: ScopeEnvironment, Environment: "production", Repository: "acme/widgets", BaseURL: "https://api.github.com"}},
 		{name: "ssh:// remote", raw: map[string]any{}, remote: "ssh://git@github.com/acme/widgets",
-			want: Config{Environment: "production", Repository: "acme/widgets", BaseURL: "https://api.github.com"}},
+			want: Config{Scope: ScopeEnvironment, Environment: "production", Repository: "acme/widgets", BaseURL: "https://api.github.com"}},
 		{name: "https remote", raw: nil, remote: "https://github.com/acme/widgets.git",
-			want: Config{Environment: "production", Repository: "acme/widgets", BaseURL: "https://api.github.com"}},
+			want: Config{Scope: ScopeEnvironment, Environment: "production", Repository: "acme/widgets", BaseURL: "https://api.github.com"}},
+		{name: "repository scope has no environment", raw: map[string]any{"scope": "repository", "repository": "o/r"},
+			want: Config{Scope: ScopeRepository, Repository: "o/r", BaseURL: "https://api.github.com"}},
+		{name: "explicit environment scope", raw: map[string]any{"scope": "environment", "repository": "o/r"},
+			want: Config{Scope: ScopeEnvironment, Environment: "production", Repository: "o/r", BaseURL: "https://api.github.com"}},
+		{name: "environment with repository scope", raw: map[string]any{"scope": "repository", "environment": "prod", "repository": "o/r"},
+			wantErr: "environment does not apply to scope: repository"},
+		{name: "unknown scope", raw: map[string]any{"scope": "org", "repository": "o/r"}, wantErr: `scope "org"`},
 		{name: "no git repo", raw: nil, wantErr: "repository"},
 		{name: "bad repository", raw: map[string]any{"repository": "widgets"}, wantErr: `"widgets"`},
 		{name: "unknown field", raw: map[string]any{"repository": "o/r", "env": "x"}, wantErr: `unknown field "env"`},
@@ -603,5 +621,96 @@ func TestCaseInsensitiveNames(t *testing.T) {
 	ci, ok := d.(destination.CaseInsensitiveNames)
 	if !ok || !ci.CaseInsensitiveNames() {
 		t.Fatal("GitHub must advertise case-insensitive names so diff folds them")
+	}
+}
+
+// Repository scope uses the same request shapes under /actions/, so the
+// Apply behaviour (sealed secrets, kind switches) carries over unchanged.
+func TestApplyRepositoryScope(t *testing.T) {
+	const base = "/repos/acme/widgets/actions/"
+	f := newFake(t)
+	f.prefix = base
+	f.vars["K"] = "plain"
+	f.secrets["NPM_TOKEN"] = []byte("hand-added")
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+	d := newDestRaw(t, srv, nil, map[string]any{"scope": "repository"})
+
+	got, err := d.Apply(context.Background(), destination.Snapshot{
+		"A": {Value: "1"}, "K": {Value: "hidden", Secret: true},
+	}, destination.ApplyOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (destination.Report{Created: []string{"A", "K"}}); !reflect.DeepEqual(norm(got), want) {
+		t.Fatalf("report = %+v, want %+v", got, want)
+	}
+	if f.vars["A"] != "1" || f.open("K") != "hidden" {
+		t.Fatalf("vars = %v secrets = %v", f.vars, sortedKeys(f.secrets))
+	}
+	wantCalls := []string{"POST " + base + "variables", "DELETE " + base + "variables/K", "PUT " + base + "secrets/K"}
+	if got := f.mutations(); !reflect.DeepEqual(got, wantCalls) {
+		t.Fatalf("mutations = %v, want %v", got, wantCalls)
+	}
+	live, err := d.Live(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := live["NPM_TOKEN"]; !ok {
+		t.Fatalf("Live = %v, want the hand-added secret listed", live)
+	}
+}
+
+// Repository secrets are shared with whatever else sets them (the UI, other
+// tools), so prune would delete secrets envc never wrote.
+func TestApplyRepositoryScopeRefusesPrune(t *testing.T) {
+	f := newFake(t)
+	f.prefix = "/repos/acme/widgets/actions/"
+	f.secrets["NPM_TOKEN"] = []byte("hand-added")
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+	d := newDestRaw(t, srv, nil, map[string]any{"scope": "repository"})
+	for _, dry := range []bool{false, true} {
+		_, err := d.Apply(context.Background(), destination.Snapshot{"A": {Value: "1"}}, destination.ApplyOptions{Prune: true, DryRun: dry})
+		if err == nil || !strings.Contains(err.Error(), "prune") || !strings.Contains(err.Error(), "scope: repository") {
+			t.Fatalf("dry=%v err = %v", dry, err)
+		}
+	}
+	if m := f.mutations(); len(m) != 0 {
+		t.Fatalf("mutations = %v", m)
+	}
+}
+
+// GitHub Free answers 403 "Upgrade to GitHub Pro…" for environment endpoints
+// on private repositories. That is a plan limit, not a token problem.
+func TestErrorPlanLimit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(403)
+		fmt.Fprint(w, `{"message":"Upgrade to GitHub Pro or make this repository public to enable this feature."}`)
+	}))
+	defer srv.Close()
+	_, err := newDest(t, srv, nil).Live(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	for _, s := range []string{"Upgrade to GitHub Pro", "private repositories", "scope: repository"} {
+		if !strings.Contains(err.Error(), s) {
+			t.Fatalf("err %q missing %q", err, s)
+		}
+	}
+	if strings.Contains(err.Error(), "lacks permission") {
+		t.Fatalf("plan limit reported as a token problem: %v", err)
+	}
+}
+
+func TestError404RepositoryScope(t *testing.T) {
+	f := newFake(t)
+	f.prefix = "/repos/acme/widgets/actions/"
+	f.fail = map[string]int{"GET /repos/acme/widgets/actions/variables": 404}
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+	_, err := newDestRaw(t, srv, nil, map[string]any{"scope": "repository"}).Live(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "acme/widgets") || strings.Contains(err.Error(), "environment") {
+		t.Fatalf("err = %v", err)
 	}
 }

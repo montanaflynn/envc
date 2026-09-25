@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
+	"strings"
 
 	"github.com/montanaflynn/envc/internal/destination/github"
 	"github.com/montanaflynn/envc/internal/destination/vercel"
@@ -36,18 +38,6 @@ func (a *App) EnvAdd(env string, o EnvAddOptions) error {
 	if err := checkEnvName(env); err != nil {
 		return err
 	}
-	path := envfile.Path(a.root(), env)
-	if _, err := os.Stat(path); err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			return exitErr(ExitDrift, fmt.Errorf("stat %s: %w", path, err))
-		}
-		if !a.Opts.DryRun {
-			if err := envfile.New().Save(path); err != nil {
-				return exitErr(ExitDrift, err)
-			}
-		}
-	}
-
 	dests := a.Roster.Sync[env]
 	if dests == nil {
 		dests = map[string]roster.DestConfig{}
@@ -71,13 +61,41 @@ func (a *App) EnvAdd(env string, o EnvAddOptions) error {
 	if o.Dotenv != "" || o.Override != "" {
 		merge("dotenv", map[string]string{"path": o.Dotenv, "override": o.Override})
 	}
-	if o.GitHub != "" {
-		merge("github", map[string]string{"environment": o.GitHub})
-		cfg, err := github.ParseConfig(a.root(), env, map[string]any(dests["github"]))
+	switch o.GitHubScope {
+	case "", github.ScopeEnvironment:
+		if o.GitHubScope != "" && o.GitHub == "" {
+			return usagef("env add %s: --github-scope environment requires --github NAME", env)
+		}
+	case github.ScopeRepository:
+		if o.GitHub != "" {
+			return usagef("env add %s: --github NAME does not apply to --github-scope repository; repository scope has no environment", env)
+		}
+	default:
+		return usagef("env add %s: --github-scope: scope %q must be %s or %s", env, o.GitHubScope, github.ScopeEnvironment, github.ScopeRepository)
+	}
+	if o.GitHub != "" || o.GitHubScope == github.ScopeRepository {
+		// Rebuild the block for the chosen scope so switching scopes never
+		// leaves a field the other scope rejects.
+		cfg := roster.DestConfig{}
+		for k, v := range dests["github"] {
+			cfg[k] = v
+		}
+		if o.GitHubScope == github.ScopeRepository {
+			delete(cfg, "environment")
+			cfg["scope"] = github.ScopeRepository
+		} else {
+			delete(cfg, "scope")
+			cfg["environment"] = o.GitHub
+		}
+		parsed, err := github.ParseConfig(a.root(), env, map[string]any(cfg))
 		if err != nil {
 			return usagef("env add %s: cannot pin the GitHub repository: %v (add a git remote named origin, or set sync.%s.github.repository: owner/repo in %s by hand)", env, err, env, roster.FileName)
 		}
-		merge("github", map[string]string{"repository": cfg.Repository})
+		cfg["repository"] = parsed.Repository
+		if others := a.githubRepoShared(env, cfg); len(others) > 0 {
+			return usagef("env add %s: %s already syncs to %s at scope: repository; repository secrets are shared, so only one environment can use them (use --github NAME for a GitHub Environment instead)", env, joinComma(others), parsed.Repository)
+		}
+		dests["github"] = cfg
 	}
 	if o.VercelProject != "" && o.Vercel == "" && dests["vercel"] == nil {
 		return usagef("env add %s: --vercel-project requires --vercel (or an existing vercel destination)", env)
@@ -93,6 +111,19 @@ func (a *App) EnvAdd(env string, o EnvAddOptions) error {
 	if o.Convex != "" {
 		merge("convex", map[string]string{"deployment": o.Convex})
 	}
+	// Create the file only once every flag checked out, so a refused add
+	// leaves nothing behind.
+	path := envfile.Path(a.root(), env)
+	if _, err := os.Stat(path); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return exitErr(ExitDrift, fmt.Errorf("stat %s: %w", path, err))
+		}
+		if !a.Opts.DryRun {
+			if err := envfile.New().Save(path); err != nil {
+				return exitErr(ExitDrift, err)
+			}
+		}
+	}
 	if len(dests) > 0 {
 		a.Roster.Sync[env] = dests
 	}
@@ -106,6 +137,41 @@ func (a *App) EnvAdd(env string, o EnvAddOptions) error {
 		return err
 	}
 	return a.refreshExample(env, f)
+}
+
+// githubRepoShared returns the other environments (sorted) whose github
+// destination writes repository-scope secrets to the same repository as
+// raw. Repository scope has no per-environment namespace, so any such pair
+// overwrites each other's values on every sync.
+func (a *App) githubRepoShared(env string, raw map[string]any) []string {
+	mine, err := github.ParseConfig(a.root(), env, raw)
+	if err != nil || mine.Scope != github.ScopeRepository {
+		return nil
+	}
+	var others []string
+	for other, dests := range a.Roster.Sync {
+		theirRaw, ok := dests[github.Name]
+		if other == env || !ok {
+			continue
+		}
+		theirs, err := github.ParseConfig(a.root(), other, map[string]any(theirRaw))
+		if err == nil && theirs.Scope == github.ScopeRepository && strings.EqualFold(theirs.Repository, mine.Repository) {
+			others = append(others, other)
+		}
+	}
+	sort.Strings(others)
+	return others
+}
+
+// githubSharedErr is the problem githubRepoShared reports, for check and sync.
+func (a *App) githubSharedErr(env string) error {
+	raw := map[string]any(a.Roster.Sync[env][github.Name])
+	others := a.githubRepoShared(env, raw)
+	if len(others) == 0 {
+		return nil
+	}
+	cfg, _ := github.ParseConfig(a.root(), env, raw)
+	return fmt.Errorf("github: %s also syncs to %s at scope: repository; each sync would overwrite the other's values (give all but one a GitHub Environment instead)", joinComma(others), cfg.Repository)
 }
 
 // EnvList returns environment names (sorted).

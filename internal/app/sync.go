@@ -7,6 +7,7 @@ import (
 
 	"github.com/montanaflynn/envc/internal/crypto"
 	"github.com/montanaflynn/envc/internal/destination"
+	"github.com/montanaflynn/envc/internal/destination/github"
 	"github.com/montanaflynn/envc/internal/envfile"
 	"github.com/montanaflynn/envc/internal/resolve"
 	"github.com/montanaflynn/envc/internal/state"
@@ -107,6 +108,12 @@ func (a *App) Sync(ctx context.Context, env, only string, prune bool) ([]SyncRes
 			res.Err = err
 			results = append(results, res)
 			continue
+		}
+		if name == github.Name {
+			if res.Err = a.githubSharedErr(env); res.Err != nil {
+				results = append(results, res)
+				continue
+			}
 		}
 		res.Report, res.Err = d.Apply(ctx, want, opts)
 		if res.Err == nil && !a.Opts.DryRun && !readsBackSecrets(d) {

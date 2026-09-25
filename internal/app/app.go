@@ -499,7 +499,7 @@ func remove(list []string, s string) []string {
 // EnvAddOptions are the destination flags for `env add`.
 type EnvAddOptions struct {
 	Dotenv, Override      string
-	GitHub                string
+	GitHub, GitHubScope   string
 	Vercel, VercelProject string
 	Convex                string
 }

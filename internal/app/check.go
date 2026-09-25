@@ -10,6 +10,7 @@ import (
 
 	"github.com/montanaflynn/envc/internal/crypto"
 	"github.com/montanaflynn/envc/internal/destination"
+	"github.com/montanaflynn/envc/internal/destination/github"
 	"github.com/montanaflynn/envc/internal/envfile"
 	"github.com/montanaflynn/envc/internal/resolve"
 	"github.com/montanaflynn/envc/internal/roster"
@@ -43,6 +44,12 @@ func (a *App) checkRoster(envs []string) []Problem {
 			}
 			if _, err := a.newDestination(syncEnv, name); err != nil {
 				addR(path, "%v", err)
+				continue
+			}
+			if name == github.Name {
+				if err := a.githubSharedErr(syncEnv); err != nil {
+					addR(path, "%v", err)
+				}
 			}
 		}
 	}

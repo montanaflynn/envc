@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/montanaflynn/envc/internal/destination"
@@ -167,5 +168,20 @@ func TestSyncWithRealDotenv(t *testing.T) {
 	must(t, err)
 	if res[0].Keys["P"] != DiffOK {
 		t.Fatalf("diff = %v", res[0].Keys)
+	}
+}
+
+// sync refuses a repository-scope github destination another environment
+// shares, before any request is made.
+func TestSyncGitHubRepositoryScopeConflict(t *testing.T) {
+	_, a, _, _ := syncRepo(t)
+	must(t, a.EnvAdd("staging", EnvAddOptions{}))
+	a.Roster.Sync["prod"]["github"] = roster.DestConfig{"scope": "repository", "repository": "acme/app"}
+	a.Roster.Sync["staging"] = map[string]roster.DestConfig{"github": {"scope": "repository", "repository": "acme/app"}}
+	must(t, a.saveRoster())
+	results, err := a.Sync(context.Background(), "prod", "github", false)
+	must(t, err)
+	if len(results) != 1 || results[0].Err == nil || !strings.Contains(results[0].Err.Error(), "staging also syncs to acme/app") {
+		t.Fatalf("results = %+v", results)
 	}
 }

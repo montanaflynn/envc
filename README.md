@@ -83,7 +83,7 @@ A destination is anything `envc sync` writes the resolved values to. Destination
 | Name | Writes | Auth |
 |---|---|---|
 | **dotenv** | `.env` (generated). `.env.local` is a hand override; envc never writes it | filesystem |
-| **github** | GitHub Actions Environment variables (`secret: false`) and secrets (`secret: true`) | `GH_TOKEN` / `GITHUB_TOKEN` — a PAT with Environment write, see [GitHub Actions](#github-actions) |
+| **github** | GitHub Actions variables (`secret: false`) and secrets (`secret: true`), in a GitHub Environment or, with `scope: repository`, on the repository itself | `GH_TOKEN` / `GITHUB_TOKEN` — a PAT with secrets and variables write, see [GitHub Actions](#github-actions) |
 | **vercel** | Project env vars, for a standard target (`production` \| `preview` \| `development`) or a [custom environment](https://vercel.com/docs/deployments/environments) named by its slug; `sensitive` from `secret:` | `VERCEL_TOKEN` |
 | **convex** | One deployment's env vars — a named deployment in a multi-deployment project, or the deployment of a project-per-environment setup | `CONVEX_DEPLOY_KEY`, or the env var named by `key_env` so each environment can hold its own key |
 
@@ -248,6 +248,7 @@ sync:
       # team: team_…
   production:
     github: { environment: production }
+    # github: { scope: repository }  # repo-level secrets instead; see GitHub Actions
     vercel: { environment: production, project: my-app }
     convex:
       deployment: quiet-lion-123  # deployment name; url: overrides for self-hosted
@@ -566,6 +567,8 @@ Usage: envc env add NAME [destination flags]
   --dotenv PATH
   --override PATH
   --github NAME                 GitHub Environment name
+  --github-scope SCOPE          environment (default) or repository; repository
+                                takes no NAME, see GitHub Actions
   --vercel ENVIRONMENT          production|preview|development, or a custom
                                 environment slug (resolved at sync time)
   --vercel-project NAME
@@ -782,6 +785,27 @@ jobs:
 The example installs envc with `go install`. `envc ensure --dry-run` needs no key for most rules. `envc diff` needs the deploy principal's private key — store it as the `ENVC_PRIVATE_KEY` secret on the GitHub Environment — plus the destination tokens.
 
 Nothing in CI writes. `sync` runs on a laptop; the **github destination** is just another host it pushes to, over the GitHub API, using a personal access token (or GitHub App token) with permission to manage Environment variables and secrets — put it in `GH_TOKEN` or `GITHUB_TOKEN` where you run `sync`. The `GITHUB_TOKEN` that GitHub Actions hands a job cannot manage secrets, which is one more reason the workflow only reads. `diff` in CI needs a read-capable token to list variables and secret *names*; `ensure --dry-run` needs nothing.
+
+### Repository secrets (GitHub Free private repos)
+
+GitHub Environments on private repositories need a Pro, Team, or Enterprise plan; on GitHub Free the API answers 403 "Upgrade to GitHub Pro…". Repository-level Actions secrets work on every plan:
+
+```bash
+envc env add production --github-scope repository
+```
+
+```yaml
+sync:
+  production:
+    github: { scope: repository, repository: acme/app }
+```
+
+Workflows read them as `${{ secrets.X }}` / `${{ vars.X }}` with no `environment:` line. Two things differ from Environment scope:
+
+- **One envc environment per repository.** Repository secrets have no per-environment namespace, so a second environment at `scope: repository` on the same repository would overwrite the first. `env add`, `check`, and `sync` refuse it; give the others a GitHub Environment (`--github NAME`) or, on GitHub Free, keep them to `.env`/Vercel/Convex.
+- **No `--prune`.** Other secrets on the repository (added in the UI, by other tools) are not envc's, so `sync --prune` errors instead of deleting them. `diff` lists them as extra. Remove a key you dropped from the file in the repository settings.
+
+Repository secrets are also readable by every workflow on every branch; Environments can limit a secret to `main` or require a reviewer. Prefer Environment scope where your plan allows it.
 
 ---
 
