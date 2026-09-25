@@ -547,6 +547,21 @@ func (v *Vercel) Apply(ctx context.Context, want destination.Snapshot, opts dest
 				}
 			}
 			rep.Updated = append(rep.Updated, key)
+		case (cur.Type == "sensitive") != (v.kind(e.Secret)["type"] == "sensitive"):
+			// Vercel refuses to change a variable to or from sensitive in place
+			// ("You cannot change the type of a Sensitive Environment
+			// Variable"; its docs say to "remove and re-add it"). Deployments
+			// already built keep their copy, so the moment between the two
+			// calls affects only a build that starts inside it.
+			if !opts.DryRun {
+				if err := v.delete(ctx, cur.ID); err != nil {
+					return rep, fmt.Errorf("%s: replacing to change its type: %w", key, err)
+				}
+				if err := v.create(ctx, key, e); err != nil {
+					return rep, fmt.Errorf("%s: deleted to change its type, and re-creating it failed (run sync again): %w", key, err)
+				}
+			}
+			rep.Updated = append(rep.Updated, key)
 		default:
 			if !opts.DryRun {
 				body := map[string]any{"value": e.Value}

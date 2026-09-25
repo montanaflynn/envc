@@ -80,6 +80,11 @@ func (f *fakeVercel) refuse(r *http.Request, body map[string]any) string {
 		return ""
 	}
 	typ, _ := body["type"].(string)
+	if r.Method == "PATCH" && typ != "" {
+		if i := f.find(strings.TrimPrefix(r.URL.Path, "/v9/projects/prj_1/env/")); i >= 0 && (f.envs[i].Type == "sensitive") != (typ == "sensitive") {
+			return "You cannot change the type of a Sensitive Environment Variable."
+		}
+	}
 	if typ != "sensitive" {
 		return ""
 	}
@@ -448,13 +453,17 @@ func TestApply(t *testing.T) {
 			envs:   []fakeVar{{Key: "A", Value: "", Type: "sensitive", Target: []string{"production"}}, {Key: "B", Value: "b", Type: "plain", Target: []string{"production"}}},
 			want:   destination.Snapshot{"A": {Value: "a"}, "B": {Value: "b", Secret: true}},
 			report: destination.Report{Updated: []string{"A", "B"}},
+			// Vercel cannot change a type to or from sensitive in place, so
+			// each is deleted and created again.
 			wantEnvs: []fakeVar{
 				{Key: "A", Value: "a", Type: "plain", Target: []string{"production"}},
 				{Key: "B", Value: "b", Type: "sensitive", Target: []string{"production"}},
 			},
 			wantCalls: []string{
-				"PATCH " + item + "id1 {target=[production] type=plain value=a visibility=config}",
-				"PATCH " + item + "id2 {target=[production] type=sensitive value=b visibility=secret}",
+				"DELETE " + item + "id1",
+				"POST " + list + " {key=A target=[production] type=plain value=a visibility=config}",
+				"DELETE " + item + "id2",
+				"POST " + list + " {key=B target=[production] type=sensitive value=b visibility=secret}",
 			},
 		},
 		{
