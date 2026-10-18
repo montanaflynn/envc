@@ -1,10 +1,12 @@
 package app
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/montanaflynn/envc/internal/roster"
@@ -88,6 +90,110 @@ func TestEnvRemove(t *testing.T) {
 		t.Fatal("sync.prod still present")
 	}
 	wantExit(t, a.EnvRemove("prod", true), ExitUsage, "unknown environment")
+}
+
+func TestEnvMove(t *testing.T) {
+	r := newRepo(t)
+	r.gitRemote("git@github.com:acme/app.git")
+	alice := newEd25519(t, "")
+	r.useKey(alice)
+	a := r.open()
+	must(t, a.EnvAdd("v2", EnvAddOptions{GitHub: "v2", Dotenv: ".env"}))
+	r.withPrincipal(a, "alice", alice, "v2")
+	must(t, a.Set("v2", "S", secretVal("s")))
+	must(t, a.Set("v2", "P", publicVal("p")))
+	must(t, a.Set("base", "B", secretVal("b"))) // check verifies base readers after the move
+	r.write(".envc/state/v2/sync.yaml", "github:\n  at: 2026-08-29T23:00:00Z\n  key_id: x\n  keys: {}\n")
+	// A hand-edited github block that leans on the default Environment
+	// name (the envc environment's name).
+	rs, _ := roster.Load(r.root)
+	delete(rs.Sync["v2"]["github"], "environment")
+	must(t, rs.Save(r.root))
+
+	for _, c := range []struct{ from, to, msg string }{
+		{"base", "app", "base"},
+		{"v2", "base", "base"},
+		{"v2", "bad/name", "invalid environment name"},
+		{"nope", "app", "unknown environment"},
+		{"v2", "local", "already exists"},
+		{"v2", "v2", "already exists"},
+	} {
+		wantExit(t, r.open().EnvMove(c.from, c.to), ExitUsage, c.msg)
+	}
+
+	// --dry-run reports the pin and touches nothing.
+	r.dryRun = true
+	d := r.open()
+	must(t, d.EnvMove("v2", "app"))
+	r.dryRun = false
+	moved := []string{
+		"move .envc/environments/v2.yaml to .envc/environments/app.yaml",
+		"move .envc/state/v2/ to .envc/state/app/",
+		"move .env.v2.example to .env.app.example",
+		"move sync.v2 to sync.app in .envc.yaml",
+		"pin sync.app.github.environment to v2: the GitHub Environment keeps its name",
+	}
+	if got := d.Effects(); !reflect.DeepEqual(got, moved) {
+		t.Fatalf("dry-run effects = %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(r.root, ".envc/environments/app.yaml")); err == nil {
+		t.Fatal("dry run wrote app.yaml")
+	}
+
+	before, err := r.open().inspect("")
+	must(t, err)
+
+	// Renaming needs no private key: nothing is decrypted or re-keyed.
+	r.noKey()
+	m := r.open()
+	must(t, m.EnvMove("v2", "app"))
+	if got := m.Effects(); !reflect.DeepEqual(got, moved) {
+		t.Fatalf("effects = %q", got)
+	}
+	for _, p := range []string{".envc/environments/v2.yaml", ".envc/state/v2", ".env.v2.example"} {
+		if _, err := os.Stat(filepath.Join(r.root, p)); err == nil {
+			t.Fatalf("%s still exists", p)
+		}
+	}
+	if !strings.Contains(r.read(".envc/state/app/envelope.yaml"), "environments/app.yaml") {
+		t.Fatalf("envelope header not updated:\n%s", r.read(".envc/state/app/envelope.yaml"))
+	}
+	if !strings.Contains(r.read(".envc/state/app/sync.yaml"), "key_id: x") {
+		t.Fatal("sync record not carried over")
+	}
+	if !strings.Contains(r.read(".env.app.example"), "template for app") {
+		t.Fatalf("example not regenerated:\n%s", r.read(".env.app.example"))
+	}
+	rs, _ = roster.Load(r.root)
+	if _, ok := rs.Sync["v2"]; ok {
+		t.Fatal("sync.v2 still present")
+	}
+	want := map[string]roster.DestConfig{
+		"github": {"environment": "v2", "repository": "acme/app"},
+		"dotenv": {"path": ".env"},
+	}
+	if !reflect.DeepEqual(rs.Sync["app"], want) {
+		t.Fatalf("sync.app = %v, want %v", rs.Sync["app"], want)
+	}
+
+	r.useKey(alice)
+	got, err := r.open().Get("app", "S")
+	must(t, err)
+	if got != "s" {
+		t.Fatalf("app S = %q", got)
+	}
+	// check sees the same repo as before, under the new name.
+	after, err := r.open().inspect("")
+	must(t, err)
+	if b, a := strings.ReplaceAll(fmt.Sprint(before), "v2", "app"), fmt.Sprint(after); a != b {
+		t.Fatalf("check after mv:\n%s\nbefore:\n%s", a, b)
+	}
+	// An explicit Environment needs no pin.
+	n := r.open()
+	must(t, n.EnvMove("app", "web"))
+	if got := n.Effects(); len(got) != 4 || strings.HasPrefix(got[len(got)-1], "pin ") {
+		t.Fatalf("effects = %q", got)
+	}
 }
 
 // env add pins the Vercel project/team and the GitHub repository it can

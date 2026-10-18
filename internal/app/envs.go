@@ -218,3 +218,88 @@ func (a *App) EnvRemove(env string, force bool) error {
 	a.stage(env, nil)
 	return a.resealBase()
 }
+
+// EnvMove renames env to newName: the manifest, .envc/state/<env>/,
+// .env.<env>.example, and sync.<env>. The data key, MAC, and sync HMACs do
+// not cover the name, so nothing is decrypted or re-keyed and no private key
+// is needed. Hosts keep their names: a github destination that relied on the
+// default Environment (the envc name) is pinned to the old name.
+func (a *App) EnvMove(env, newName string) error {
+	if err := baseGuard(env); err != nil {
+		return err
+	}
+	if err := checkEnvName(newName); err != nil {
+		return err
+	}
+	f, err := a.loadLenient(env)
+	if err != nil {
+		return err
+	}
+	if a.envExists(newName) {
+		return usagef("env mv %s %s: %s already exists", env, newName, newName)
+	}
+	hasState := exists(state.EnvDir(a.root(), env))
+	hasExample := exists(ExamplePath(a.root(), env))
+	a.effect(fmt.Sprintf("move %s to %s", relPath(envfile.Path("", env)), relPath(envfile.Path("", newName))))
+	if hasState {
+		a.effect(fmt.Sprintf("move %s/ to %s/", relPath(state.EnvDir("", env)), relPath(state.EnvDir("", newName))))
+	}
+	if hasExample {
+		a.effect(fmt.Sprintf("move %s to %s", exampleName(env), exampleName(newName)))
+	}
+	if dests, ok := a.Roster.Sync[env]; ok {
+		a.effect(fmt.Sprintf("move sync.%s to sync.%s in %s", env, newName, roster.FileName))
+		if gh := dests[github.Name]; gh != nil {
+			scope, _ := gh["scope"].(string)
+			name, _ := gh["environment"].(string)
+			if scope != github.ScopeRepository && name == "" {
+				gh["environment"] = env
+				a.effect(fmt.Sprintf("pin sync.%s.github.environment to %s: the GitHub Environment keeps its name", newName, env))
+			}
+		}
+		delete(a.Roster.Sync, env)
+		a.Roster.Sync[newName] = dests
+	}
+	if a.Opts.DryRun {
+		return nil
+	}
+	// Files first, roster last: an interrupted move leaves sync.<env>
+	// pointing at the old name, which check reports, rather than a roster
+	// naming a manifest that is not there yet.
+	from, to := envfile.Path(a.root(), env), envfile.Path(a.root(), newName)
+	if err := os.Rename(from, to); err != nil {
+		return exitErr(ExitDrift, fmt.Errorf("rename %s: %w", from, err))
+	}
+	if hasState {
+		if err := os.Rename(state.EnvDir(a.root(), env), state.EnvDir(a.root(), newName)); err != nil {
+			return exitErr(ExitDrift, fmt.Errorf("rename %s: %w", state.EnvDir(a.root(), env), err))
+		}
+	}
+	// The envelope's header names its manifest.
+	if f.Crypto != nil {
+		if err := f.Crypto.Save(a.root(), newName); err != nil {
+			return exitErr(ExitDrift, err)
+		}
+	}
+	if err := a.saveRoster(); err != nil {
+		return err
+	}
+	if err := removeExample(a.root(), env); err != nil {
+		return err
+	}
+	return a.refreshExample(newName, f)
+}
+
+// envExists reports whether anything already claims env: a manifest, a
+// state directory, or a sync block.
+func (a *App) envExists(env string) bool {
+	if _, ok := a.Roster.Sync[env]; ok {
+		return true
+	}
+	return exists(envfile.Path(a.root(), env)) || exists(state.EnvDir(a.root(), env))
+}
+
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}

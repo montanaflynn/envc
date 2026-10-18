@@ -368,6 +368,14 @@ expect_exit 0 "$ENVC" env ls
 grep -q '^staging$' "$WORK/out" && [ -f .env.staging.example ] && pass "env ls + template for staging" || fail "env ls staging"
 expect_exit 3 "$ENVC" env add 'bad/name'
 grep -q 'invalid environment name' "$WORK/err" && pass "invalid environment name is a usage error" || fail "bad name: $(cat "$WORK/err")"
+expect_exit 3 "$ENVC" env mv local staging
+grep -q 'already exists' "$WORK/err" && pass "env mv refuses an existing name" || fail "env mv onto staging: $(cat "$WORK/err")"
+expect_exit 0 "$ENVC" env mv local dev
+grep -q 'renamed environment local to dev\|rename environment local to dev' "$WORK/err" && [ -f .envc/environments/dev.yaml ] && [ -f .envc/state/dev/envelope.yaml ] && [ -f .env.dev.example ] && [ ! -f .env.local.example ] && pass "env mv moves manifest, state, and template" || fail "env mv local dev: $(cat "$WORK/err")"
+expect_exit 0 "$ENVC" get dev DATABASE_URL
+grep -q 'postgres://localhost/app' "$WORK/out" && pass "secrets still decrypt after env mv" || fail "get dev after mv"
+expect_exit 0 "$ENVC" env rename dev local
+[ -f .envc/environments/local.yaml ] && [ ! -d .envc/state/dev ] && pass "env rename is an alias of env mv" || fail "env rename dev local"
 expect_exit 3 "$ENVC" env rm local
 grep -q 'pass --force' "$WORK/err" && pass "env rm refuses an environment with secrets" || fail "env rm local: $(cat "$WORK/err")"
 expect_exit 0 "$ENVC" env rm staging
