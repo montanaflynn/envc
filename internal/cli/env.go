@@ -9,9 +9,9 @@ import (
 func (c *cli) envCmd() *cobra.Command {
 	cmd := group(&cobra.Command{
 		Use:   "env",
-		Short: "add, list, remove environments",
+		Short: "add, list, rename, remove environments",
 	})
-	cmd.AddCommand(c.envAddCmd(), c.envLsCmd(), c.envRmCmd())
+	cmd.AddCommand(c.envAddCmd(), c.envLsCmd(), c.envMvCmd(), c.envRmCmd())
 	return cmd
 }
 
@@ -75,6 +75,31 @@ func (c *cli) envLsCmd() *cobra.Command {
 			for _, e := range envs {
 				c.outf("%s", e)
 			}
+			return nil
+		},
+	}
+}
+
+func (c *cli) envMvCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:     "mv OLD NEW",
+		Aliases: []string{"rename"},
+		Short:   "rename an environment",
+		Long: `mv renames .envc/environments/OLD.yaml, .envc/state/OLD/, .env.OLD.example,
+and sync.OLD in .envc.yaml. Nothing is decrypted or re-keyed, so it needs no
+private key. Hosts keep their names: a github destination with no
+environment: is pinned to OLD so it keeps syncing to the same GitHub
+Environment.`,
+		Args: usageArgs(cobra.ExactArgs(2)),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := c.open()
+			if err != nil {
+				return err
+			}
+			if err := a.EnvMove(args[0], args[1]); err != nil {
+				return err
+			}
+			c.done("rename environment "+args[0]+" to "+args[1], effects(a)...)
 			return nil
 		},
 	}

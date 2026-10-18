@@ -86,7 +86,7 @@ func TestHelp(t *testing.T) {
 	_, out, _ := run(t, "", "--help")
 	for _, short := range []string{
 		"create .envc.yaml and gitignore entries",
-		"add, list, remove environments",
+		"add, list, rename, remove environments",
 		"grant decrypt access",
 		"make the generated state match the files; --dry-run only reports",
 		"print the environment file (secrets redacted)",

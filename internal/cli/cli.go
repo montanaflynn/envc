@@ -255,6 +255,8 @@ func pastTense(s string) string {
 		"remove":     "removed",
 		"write":      "wrote",
 		"refresh":    "refreshed",
+		"pin":        "pinned",
+		"move":       "moved",
 	}[verb]
 	if !ok {
 		return s
